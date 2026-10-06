@@ -199,7 +199,6 @@ class EpubReflow extends _$EpubReflow {
       if (!ref.mounted) return;
 
       final stopwatch = Stopwatch()..start();
-      final lastFrameWait = Stopwatch()..start();
 
       while (ref.mounted &&
           _pipeline.isAttached &&
@@ -258,15 +257,7 @@ class EpubReflow extends _$EpubReflow {
           phaseWatch
             ..reset()
             ..start();
-
-          // ensure at least 5 updates per second
-          if (lastFrameWait.elapsed >= const Duration(milliseconds: 200)) {
-            await SchedulerBinding.instance.endOfFrame;
-            lastFrameWait.reset();
-          } else {
-            await Future<void>.delayed(Duration.zero);
-          }
-
+          await Future<void>.delayed(0.ms);
           phaseWatch.stop();
           metrics.recordYield(phaseWatch.elapsed);
         }
