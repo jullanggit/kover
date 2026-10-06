@@ -30,7 +30,7 @@ sealed class GeneralSettingsState with _$GeneralSettingsState {
   const factory GeneralSettingsState({
     @Default(false) bool sendDiagnostics,
     @Default(null) String? localeString,
-    @Default(null) TextDirection? textDirection,
+    @TextDirectionConverter() @Default(null) TextDirection? textDirection,
     @Default(<NavbarDestinations>[.home, .wantToRead])
     List<NavbarDestinations> navbarDestinations,
   }) = _GeneralSettingsState;
@@ -107,4 +107,22 @@ class GeneralSettings extends _$GeneralSettings {
       ),
     );
   }
+}
+
+class TextDirectionConverter implements JsonConverter<TextDirection?, String?> {
+  const TextDirectionConverter();
+
+  @override
+  TextDirection? fromJson(String? json) => switch (json) {
+    'rtl' => TextDirection.rtl,
+    'ltr' => TextDirection.ltr,
+    _ => null,
+  };
+
+  @override
+  String? toJson(TextDirection? object) => switch (object) {
+    TextDirection.rtl => 'rtl',
+    TextDirection.ltr => 'ltr',
+    _ => null,
+  };
 }
