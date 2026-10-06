@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:freezed_annotation/freezed_annotation.dart';
@@ -221,11 +220,7 @@ class EpubReflow extends _$EpubReflow {
         // Yield to the event loop periodically to keep the UI responsive.
         if (stopwatch.elapsed >= _maxChunkDuration) {
           stopwatch.reset();
-          if (SchedulerBinding.instance.hasScheduledFrame) {
-            await SchedulerBinding.instance.endOfFrame;
-          } else {
-            await Future<void>.delayed(0.ms);
-          }
+          await Future<void>.delayed(0.ms);
         }
       }
     } on MeasureTreeBuildException catch (e, stacktrace) {
