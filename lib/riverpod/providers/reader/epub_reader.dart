@@ -19,6 +19,7 @@ import 'package:kover/utils/extensions/string.dart';
 import 'package:kover/utils/html_constants.dart';
 import 'package:kover/utils/logging.dart';
 import 'package:kover/utils/reflow_engine.dart';
+import 'package:kover/utils/reflow_metrics.dart';
 import 'package:kover/utils/headless_measure_pipeline.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
@@ -56,6 +57,7 @@ class EpubReflow extends _$EpubReflow {
   late EpubMeasureWidgetBuilder _measureBuilder;
   late Duration _maxChunkDuration;
   late ReflowEngine _cursor;
+  ReflowMetrics? _metrics;
 
   @override
   Future<EpubReflowState> build({
@@ -166,7 +168,7 @@ class EpubReflow extends _$EpubReflow {
     if (!ref.mounted || viewport.isEmpty) return;
 
     _measureBuilder = measureBuilder;
-    final refreshRateClamped = refreshRate > 0 ? refreshRate : 30;
+    final refreshRateClamped = refreshRate > 0 ? refreshRate : 30.0;
     _maxChunkDuration = Duration(
       milliseconds: (1000 / refreshRateClamped).round() ~/ 2,
     );
@@ -174,12 +176,26 @@ class EpubReflow extends _$EpubReflow {
     if (!state.hasValue || state.value?.status != .initial) return;
     state = AsyncData(state.value!.copyWith(status: .measuring));
 
-    // Ensure css is hot and ready
-    await ref.read(customCssProvider(seriesId: seriesId).future);
+    final metrics = _metrics = ReflowMetrics(
+      seriesId: seriesId,
+      chapterId: chapterId,
+      page: page,
+      viewport: viewport,
+      devicePixelRatio: devicePixelRatio,
+      refreshRate: refreshRateClamped,
+      settings: _layoutSettingsSnapshot(),
+    )..start();
 
-    _pipeline.attach(size: viewport, devicePixelRatio: devicePixelRatio);
+    var outcome = ReflowOutcome.aborted;
+    final phaseWatch = Stopwatch();
 
     try {
+      // Ensure css is hot and ready
+      await ref.read(customCssProvider(seriesId: seriesId).future);
+
+      _pipeline.attach(size: viewport, devicePixelRatio: devicePixelRatio);
+      metrics.markSetupComplete();
+
       if (!ref.mounted) return;
 
       final stopwatch = Stopwatch()..start();
@@ -188,7 +204,13 @@ class EpubReflow extends _$EpubReflow {
           _pipeline.isAttached &&
           state.value?.status == .measuring) {
         final maxHeight = _pipeline.viewportSize?.height ?? viewport.height;
+
+        phaseWatch
+          ..reset()
+          ..start();
         final bufferHtml = _cursor.buffer.outerHtml;
+        phaseWatch.stop();
+        metrics.recordSerialize(phaseWatch.elapsed, bufferHtml.length);
 
         final current = await future;
         if (!ref.mounted ||
@@ -197,9 +219,14 @@ class EpubReflow extends _$EpubReflow {
           return;
         }
 
+        phaseWatch
+          ..reset()
+          ..start();
         final height = _pipeline
             .measure(_measureBuilder(bufferHtml, current.page.styles))
             .height;
+        phaseWatch.stop();
+        metrics.recordMeasure(phaseWatch.elapsed);
 
         // A zero-height measure for non-empty content means the measure
         // pass is silently broken; never treat it as "fits".
@@ -211,17 +238,35 @@ class EpubReflow extends _$EpubReflow {
           );
         }
 
+        phaseWatch
+          ..reset()
+          ..start();
         if (height <= maxHeight) {
+          metrics.recordFit();
           await _addElement();
         } else {
+          metrics.recordOverflow();
           await _handleOverflow();
         }
+        phaseWatch.stop();
+        metrics.recordCommit(phaseWatch.elapsed);
 
         // Yield to the event loop periodically to keep the UI responsive.
         if (stopwatch.elapsed >= _maxChunkDuration) {
           stopwatch.reset();
+          phaseWatch
+            ..reset()
+            ..start();
+
           await Future<void>.delayed(0.ms);
+
+          phaseWatch.stop();
+          metrics.recordYield(phaseWatch.elapsed);
         }
+      }
+
+      if (ref.mounted && state.value?.status == .done) {
+        outcome = ReflowOutcome.completed;
       }
     } on MeasureTreeBuildException catch (e, stacktrace) {
       log.error(
@@ -232,7 +277,36 @@ class EpubReflow extends _$EpubReflow {
       if (ref.mounted) {
         state = AsyncError(e, stacktrace);
       }
+    } finally {
+      metrics.finish(outcome: outcome);
+      _metrics = null;
+      ReflowMetricsCollector.record(metrics);
+      if (kReflowMetricsLogging) {
+        log.info('epub reflow metrics', attributes: metrics.toLogAttributes());
+      }
     }
+  }
+
+  /// Snapshot of the reader settings that affect pagination, attached to reflow
+  /// metrics so runs can be compared across configurations.
+  Map<String, dynamic> _layoutSettingsSnapshot() {
+    final settings = ref
+        .read(epubReaderSettingsProvider(seriesId: seriesId))
+        .value;
+    if (settings == null) return const <String, dynamic>{};
+
+    return {
+      'font_size': settings.fontSize,
+      'margin_size': settings.marginSize,
+      'line_height': settings.lineHeight,
+      'paragraph_spacing': settings.paragraphSpacing,
+      'word_spacing': settings.wordSpacing,
+      'letter_spacing': settings.letterSpacing,
+      'font_family': settings.fontFamily,
+      'reader_mode': settings.mode.name,
+      'text_alignment': settings.textAlignment.name,
+      'remove_paragraph_indent': settings.removeParagraphIndent,
+    };
   }
 
   Future<void> _addElement() async {
@@ -269,13 +343,18 @@ class EpubReflow extends _$EpubReflow {
     if (!identical(state.value, current)) return;
 
     state = AsyncData(newState);
+    _metrics?.recordSubpages(newState.subpages.length);
   }
 
   Future<void> _handleOverflow() async {
     final current = state.value;
     if (current == null || current.status == .done) return;
 
-    if (_cursor.overflow()) return;
+    if (_cursor.overflow()) {
+      _metrics?.recordSearchStep();
+      return;
+    }
+    _metrics?.recordSplit();
 
     final newSubpageNode = _cursor.commitSplit();
 
@@ -300,6 +379,7 @@ class EpubReflow extends _$EpubReflow {
     if (!identical(state.value, current)) return;
 
     state = AsyncData(newState);
+    _metrics?.recordSubpages(newState.subpages.length);
   }
 
   Future<EpubReflowState> _checkResumePoint({
@@ -314,6 +394,7 @@ class EpubReflow extends _$EpubReflow {
           '[${HtmlConstants.scrollIdAttribute}="${current.scrollId!.cssEscaped}"]',
         );
         if (resumePoint != null && resumePoint.hasChildNodes()) {
+          _metrics?.markResumeFound();
           log.info(
             'found resume point',
             attributes: {
