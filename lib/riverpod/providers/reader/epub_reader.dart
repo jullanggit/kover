@@ -127,7 +127,9 @@ class EpubReflow extends _$EpubReflow {
       }
     }
 
-    _cursor = BinaryReflowEngine(root: pageContent.root.children.first);
+    _cursor = ExponentialBinaryReflowEngine(
+      root: pageContent.root.children.first,
+    );
 
     return EpubReflowState(
       page: pageContent,

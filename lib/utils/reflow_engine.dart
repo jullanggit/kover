@@ -17,11 +17,12 @@ abstract class ReflowEngine {
   Element commitSplit();
 }
 
-/// Binary search based reflow engine. Each tree level is probed by binary search
-/// on the number of child units that fit. When the boundary unit is found,
-/// the engine descends one level and binary searches within it, until the
-/// unit is unsplittable (same end condition as [LinearReflowEngine]).
-class BinaryReflowEngine implements ReflowEngine {
+/// Exponential + binary search based reflow engine. Each tree level probes
+/// exponential prefixes (1, 2, 4, ...) until the content overflows, then binary
+/// searches between the last known fit and that overflow. When the boundary
+/// unit is found, the engine descends one level and repeats, until the unit is
+/// unsplittable (same end condition as the previous linear cursor).
+class ExponentialBinaryReflowEngine implements ReflowEngine {
   static const Set<String> _leafTags = {'img', 'svg'};
   static final _wordsReg = RegExp(r'(?=\s)');
 
@@ -29,7 +30,7 @@ class BinaryReflowEngine implements ReflowEngine {
   final Element _buffer;
   final List<_Frame> _frames = [];
 
-  BinaryReflowEngine({required Element root})
+  ExponentialBinaryReflowEngine({required Element root})
     : _root = root.clone(true),
       _buffer = root.clone(false) {
     _frames.add(_Frame(target: _buffer, pending: List.of(_root.nodes)));
@@ -64,18 +65,31 @@ class BinaryReflowEngine implements ReflowEngine {
       parent.pending[slot] = frame.target;
       parent.splitAt = null;
       parent.lo = slot + 1;
-      parent.hi = parent.pending.length;
-      parent.p = parent.lo + ((parent.hi - parent.lo + 1) >> 1);
-      _rebuild(parent);
+      if (parent.hi <= parent.lo) {
+        parent.exponential = true;
+      }
+      _advance(parent);
       return true;
     }
 
-    // Probe the upper half of the remaining range. When the range collapsed
-    // (hi == lo + 1) this re-appends the known overflower so the driver
-    // reports overflow and the boundary handling kicks in.
-    frame.p = frame.lo + ((frame.hi - frame.lo + 1) >> 1);
-    _rebuild(frame);
+    _advance(frame);
     return true;
+  }
+
+  /// Mirrors the next probe of [frame]: exponential while no
+  /// overflow bound is known, otherwise binary searching the bounded range.
+  void _advance(_Frame frame) {
+    if (frame.exponential) {
+      final grown = frame.lo < 1 ? 1 : frame.lo * 2;
+      frame.p = grown < frame.pending.length ? grown : frame.pending.length;
+    } else {
+      // The range is bounded by a probe that overflowed: binary-search it.
+      // When the range collapsed (hi == lo + 1) this re-appends the known
+      // overflower so the driver reports overflow and the boundary handling
+      // kicks in.
+      frame.p = frame.lo + ((frame.hi - frame.lo + 1) >> 1);
+    }
+    _rebuild(frame);
   }
 
   @override
@@ -86,6 +100,8 @@ class BinaryReflowEngine implements ReflowEngine {
     if (frame.p == 0) return false;
 
     frame.hi = frame.p;
+    // Once a probe overflows, stop exponential probing and binary-search the range.
+    frame.exponential = false;
 
     // Range not collapsed: shrink the probe to the midpoint.
     if (frame.hi - frame.lo > 1) {
@@ -189,6 +205,7 @@ class BinaryReflowEngine implements ReflowEngine {
       f.p = 0;
       f.lo = 0;
       f.hi = f.pending.length;
+      f.exponential = true;
     }
 
     return result;
@@ -241,6 +258,10 @@ class _Frame {
 
   /// Binary search upper bound. Matches units known to overflow [target].
   int hi;
+
+  /// Whether the search is still in the exponential probing phase
+  /// or has an overflow bound and can halve the range.
+  bool exponential = true;
 
   /// Index of the straddler unit a child frame descended into, if any.
   int? splitAt;
