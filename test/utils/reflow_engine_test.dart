@@ -4,10 +4,10 @@ import 'package:kover/utils/html_constants.dart';
 import 'package:kover/utils/reflow_engine.dart';
 
 void main() {
-  group('BinaryReflowEngine', () {
+  group('ExponentialBinaryReflowEngine', () {
     test('when empty nodes, addNext returns false', () {
       // <div></div>
-      final engine = BinaryReflowEngine(root: Element.tag('div'));
+      final engine = ExponentialBinaryReflowEngine(root: Element.tag('div'));
 
       expect(engine.addNext(), isFalse);
     });
@@ -15,7 +15,7 @@ void main() {
     test('when exhausted, addNext returns false', () {
       // <div>Hello</div>
       final root = Element.tag('div')..append(Text('Hello'));
-      final engine = BinaryReflowEngine(root: root);
+      final engine = ExponentialBinaryReflowEngine(root: root);
 
       expect(engine.addNext(), isTrue);
       expect(engine.addNext(), isFalse);
@@ -28,14 +28,14 @@ void main() {
       // </div>
       final root = Element.tag('div')
         ..append(Element.tag('img')..append(Text('Hello')));
-      final engine = BinaryReflowEngine(root: root);
+      final engine = ExponentialBinaryReflowEngine(root: root);
 
       engine.addNext();
       // Simulate the driver reporting overflow on the single unit.
       expect(engine.overflow(), isFalse);
     });
 
-    test('when no overflow bound, addNext halves the probe range', () {
+    test('when no overflow bound, addNext doubles the probe range', () {
       // <div>
       //   <p>aaaa</p>
       //   <p>aaaa</p>
@@ -47,10 +47,10 @@ void main() {
         ..append(Element.tag('p')..append(Text('aaaa')))
         ..append(Element.tag('p')..append(Text('aaaa')))
         ..append(Element.tag('p')..append(Text('aaaa')));
-      final engine = BinaryReflowEngine(root: root);
+      final engine = ExponentialBinaryReflowEngine(root: root);
 
-      // Binary search: 2, 3, 4.
-      for (final expected in [2, 3, 4]) {
+      // Galloping: 1, 2, 4.
+      for (final expected in [1, 2, 4]) {
         expect(engine.addNext(), isTrue);
         expect(engine.buffer.nodes.length, equals(expected));
       }
@@ -58,35 +58,48 @@ void main() {
       expect(engine.addNext(), isFalse);
     });
 
-    test('when range not collapsed, splitChild shrinks the buffer', () {
-      // <div>
-      //   <p>aaaa</p>
-      //   <p>aaaa</p>
-      //   <p>aaaa</p>
-      //   <p>aaaa</p>
-      // </div>
-      final root = Element.tag('div')
-        ..append(Element.tag('p')..append(Text('aaaa')))
-        ..append(Element.tag('p')..append(Text('aaaa')))
-        ..append(Element.tag('p')..append(Text('aaaa')))
-        ..append(Element.tag('p')..append(Text('aaaa')));
-      final engine = BinaryReflowEngine(root: root);
+    test('when a probe overflows, the range is halved around the boundary', () {
+      // <div> with 8 paragraphs.
+      final root = Element.tag('div');
+      for (var i = 0; i < 8; i++) {
+        root.append(Element.tag('p')..append(Text('aaaa')));
+      }
+      final engine = ExponentialBinaryReflowEngine(root: root);
 
+      // Galloping: 1, 2, 4.
       expect(engine.addNext(), isTrue);
-      expect(engine.buffer.nodes.length, equals(2));
-
-      // Overflow at 2 with 0 confirmed: shrinks to midpoint 1.
-      expect(engine.overflow(), isTrue);
       expect(engine.buffer.nodes.length, equals(1));
-
-      // 1 fits, range collapsed (2 overflows) -> re-append known overflower.
       expect(engine.addNext(), isTrue);
       expect(engine.buffer.nodes.length, equals(2));
+      expect(engine.addNext(), isTrue);
+      expect(engine.buffer.nodes.length, equals(4));
 
-      // Overflow at 2: boundary collapsed, descend into the 2nd paragraph.
+      // 4 overflows while 2 is known to fit: shrink to the midpoint 3.
       expect(engine.overflow(), isTrue);
-      expect(engine.buffer.nodes.length, equals(2));
-      expect(engine.buffer.nodes.last.nodes, isEmpty);
+      expect(engine.buffer.nodes.length, equals(3));
+    });
+
+    test('after a split, the next page gallops from a small probe', () {
+      // 100 unsplittable units, so a boundary commits directly.
+      final root = Element.tag('div');
+      for (var i = 0; i < 100; i++) {
+        root.append(Element.tag('img'));
+      }
+      final engine = ExponentialBinaryReflowEngine(root: root);
+
+      // Page holds 2 units: gallop 1 (fit), 2 (fit), 4 (overflow).
+      engine.addNext();
+      engine.addNext();
+      engine.addNext();
+      expect(engine.overflow(), isTrue); // shrink to 3
+      expect(engine.buffer.nodes.length, equals(3));
+      expect(engine.overflow(), isFalse); // boundary on <img>: commit
+      engine.commitSplit();
+
+      // The next page must probe small again, not half of the 98 remaining
+      // units. This is the regression guard for the O(n^2) re-render blow-up.
+      expect(engine.addNext(), isTrue);
+      expect(engine.buffer.nodes.length, equals(1));
     });
 
     test('when boundary found, descends into the overflowing unit', () {
@@ -97,7 +110,7 @@ void main() {
       final root = Element.tag('div')
         ..append(Element.tag('p')..append(Text('one two')))
         ..append(Element.tag('p')..append(Text('three four')));
-      final engine = BinaryReflowEngine(root: root);
+      final engine = ExponentialBinaryReflowEngine(root: root);
 
       engine.addNext(); // p1
       engine.addNext(); // p2
@@ -121,7 +134,7 @@ void main() {
       final expectedNext = Element.tag('div')
         ..append(Element.tag('p')..append(Text('there')));
 
-      final engine = BinaryReflowEngine(root: root);
+      final engine = ExponentialBinaryReflowEngine(root: root);
 
       engine.addNext(); // p1
       engine.addNext(); // p2
@@ -154,7 +167,7 @@ void main() {
         final expectedNext = Element.tag('div')
           ..append(Element.tag('p')..append(Text('There. Sentences.')));
 
-        final engine = BinaryReflowEngine(root: root);
+        final engine = ExponentialBinaryReflowEngine(root: root);
 
         engine.addNext(); // p probed
         engine.overflow(); // descend into p
@@ -191,7 +204,7 @@ void main() {
         final expectedNext = Element.tag('div')
           ..append(Element.tag('p')..append(Text('There. Sentences')));
 
-        final engine = BinaryReflowEngine(root: root);
+        final engine = ExponentialBinaryReflowEngine(root: root);
 
         engine.addNext(); // p probed
         engine.overflow(); // descend into p
@@ -226,7 +239,7 @@ void main() {
       final expectedNext = Element.tag('div')
         ..append(Element.tag('p')..append(Text('"There."')));
 
-      final engine = BinaryReflowEngine(root: root);
+      final engine = ExponentialBinaryReflowEngine(root: root);
 
       engine.addNext(); // p probed
       engine.overflow(); // descend into p
@@ -252,7 +265,7 @@ void main() {
       // ... it is kept on the following word: no whitespace is lost.
       final expectedNext = Element.tag('p')..append(Text('white space'));
 
-      final engine = BinaryReflowEngine(root: root);
+      final engine = ExponentialBinaryReflowEngine(root: root);
 
       engine.addNext(); // text probed
       engine.overflow(); // split into 'Hello', ' there', ' white', ' space'
@@ -278,7 +291,7 @@ void main() {
         final root = Element.tag('div')
           ..append(Element.tag('img'))
           ..append(Element.tag('p')..append(Text('after')));
-        final engine = BinaryReflowEngine(root: root);
+        final engine = ExponentialBinaryReflowEngine(root: root);
 
         engine.addNext(); // p1: img probed
         // The img overflows and cannot split; the page is empty, so it is
@@ -305,7 +318,7 @@ void main() {
         ..append(Element.tag('p')..append(Text('Hello')))
         ..append(Element.tag('p')..append(Text('there')));
 
-      final engine = BinaryReflowEngine(root: root);
+      final engine = ExponentialBinaryReflowEngine(root: root);
 
       engine.addNext(); // p1
       engine.addNext(); // p2
